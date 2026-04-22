@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  # 后端 API 服务 (FastAPI)
+  api:
+    build: .
+    container_name: sentiment_api
+    command: uvicorn src.6_api:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_API_BASE=${OPENAI_API_BASE:-https://api.openai.com/v1}
+      - LLM_MODEL=${LLM_MODEL:-gpt-3.5-turbo}
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
+  # 前端可视化服务 (Streamlit)
+  web:
+    build: .
+    container_name: sentiment_web
+    command: streamlit run src/7_app.py --server.port 8501 --server.address 0.0.0.0
+    ports:
+      - "8501:8501"
+    environment:
+      - API_URL=http://api:8000
+    volumes:
+      - .:/app
+    depends_on:
+      - api
+    restart: unless-stopped

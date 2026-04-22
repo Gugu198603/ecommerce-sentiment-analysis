@@ -175,6 +175,13 @@ def main():
     user_input = input("请输入你想分析的商品关键词 (例如: 手机 / 吹风机 / 电脑，按回车使用默认 '手机'): ")
     keyword = user_input.strip() if user_input.strip() else "手机"
     
+    # 兼容自动化流水线，避免卡在 input 导致无法执行
+    # 在非交互环境下或传参时静默处理
+    import sys
+    if not sys.stdin.isatty():
+        logger.info("检测到非交互式终端，使用默认配置执行自动化抓取任务...")
+        keyword = "手机"
+    
     # 使用 BeautifulSoup 从搜索页面提取 SKU，满足课程要求
     skus = search_jd_skus(keyword, max_skus=10)
     
