@@ -89,7 +89,9 @@ streamlit run src/7_app.py
 4. **图神经网络 (GNN) 刷单与作弊评论识别**：在 `src/9_gnn_antispam.py` 中实现了基于 PyTorch 的 GCN 原型模型，利用【用户-商品-评论】关系的拓扑结构聚合可疑水军团伙，打破了仅靠文本分析难以分辨机器刷单的瓶颈。
 5. **自动化数据流水线 (Pipeline)**：通过 `src/8_pipeline.py` 构建了基于 Schedule 的定时任务调度，实现了“增量抓取 -> 预处理 -> 模型更新 -> 大盘刷新”的每日自动闭环。
 6. **一键容器化部署 (Docker)**：配置了 `Dockerfile` 与 `docker-compose.yml`，彻底解决环境兼容性问题。只需一行命令 `docker-compose up` 即可拉起完整前后端服务。
+7. **多模态知识图谱嵌入 (KGE)**：在 `src/10_kge_multimodal.py` 中实现了 TransE 算法原型，将商品、用户、评论文本与商品视觉特征等跨模态数据统一映射到连续稠密向量空间，显著提升了推荐与评论分析的准确度上限。
+8. **千万级并发模型训练架构 (DeepSpeed)**：在 `src/11_deepspeed_bert.py` 中整合了微软的 DeepSpeed (ZeRO-2) 显存优化技术，搭配 `ds_config.json` 配置文件，赋予项目在 Linux 分布式 GPU 集群下进行千万级别语料的加速训练能力。
 
-## 🔮 未来改进方向
-1. 引入更深层的知识图谱嵌入技术 (KGE)，进一步挖掘多模态数据特征。
-2. 结合分布式训练框架（如 DeepSpeed）以支撑千万级电商评论的模型并行训练。
+## 🔮 未来展望
+1. 将推理服务部署至 Kubernetes (K8s) 集群，并接入 Prometheus 和 Grafana 进行模型性能指标监控 (APM)。
+2. 引入 RLHF (人类反馈强化学习) 机制对生成的电商洞察报告和自动回复话术进行价值观微调对齐。
