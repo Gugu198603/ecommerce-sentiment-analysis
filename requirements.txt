@@ -1,0 +1,14 @@
+requests>=2.28.0
+beautifulsoup4>=4.11.0
+pandas>=1.5.0
+numpy>=1.23.0
+jieba>=0.42.1
+torch>=2.0.0
+transformers>=4.30.0
+scikit-learn>=1.2.0
+# 由于当前 Python 3.14 环境编译 gensim 会报错，这里暂时去掉，改为在代码中使用其他方式处理或让用户在兼容环境中安装
+matplotlib>=3.7.0
+seaborn>=0.12.0
+wordcloud>=1.9.0
+tqdm>=4.65.0
+pytest>=7.4.0
