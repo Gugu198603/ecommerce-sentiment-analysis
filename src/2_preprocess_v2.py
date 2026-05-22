@@ -7,7 +7,7 @@ from sklearn.model_selection import train_test_split
 from imblearn.over_sampling import RandomOverSampler
 
 # ==================== 配置参数 ====================
-FILE_PATH = "../data/raw/review.csv"          # 原始数据文件路径
+FILE_PATH = "../data/raw/str_review.csv"          # 原始数据文件路径
 SHEET_NAME = 0                     # Excel工作表名或索引
 OUTPUT_CSV_CLEAN = "../data/processed/cleaned_data.csv"      # 输出CSV文件名
 
@@ -177,6 +177,8 @@ def main():
 
     # 2. 列映射与筛选
     col_mapping = {
+        'product_id': 'product_id',
+        'person_id': 'user_id',
         'review_content': 'content',
         'review_rating': 'score',
         'review_time': 'time',
