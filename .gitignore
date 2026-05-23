@@ -24,6 +24,9 @@ results/figures/*
 results/reports/*
 !results/reports/.gitkeep
 
+# Claude
+.claude/
+
 # OS generated files
 .DS_Store
 .DS_Store?
