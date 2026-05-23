@@ -80,7 +80,15 @@ streamlit run src/7_app.py
 - `score_sentiment_dist.png`: 用户评分与情感预测一致性分析图
 
 ## 👥 团队分工
-- 独立开发（或在此填入你的团队成员姓名及负责模块）
+- 黄杉：细粒度情感分析（RoBERTa-wwm + Span-ABSA），输出 `aspect_sentiment.jsonl`。
+- 李玉：隐式情感识别（Prompt-based Few-shot Learning），输出 `implicit_sentiment_full.csv`。
+- 王洁芸：因果推断（PSM + CausalForest），输出 `causal_report.txt`。
+- 邓丽娟：推荐系统（LightGCN + 情感特征融入），输出 `recommend_result.csv`、`Recall@10`、`NDCG@10`。
+
+## 🔁 推荐模块当前进展
+- 已在 `data/processed/cleaned_data.csv` 中补齐 `user_id` 与 `product_id`，其中 `product_id` 作为推荐系统的 `item_id` 使用。
+- 已新增 `src/recommender.py`，当前实现基础 LightGCN-style 推荐训练流程，输出 Top-K 推荐列表与 `Recall@10`、`NDCG@10`。
+- 后续可将 `implicit_sentiment_full.csv` 中的 `implicit_score` 合并回交互表，升级为情感增强 LightGCN。
 
 ## 🌟 核心功能亮点 (已实现)
 1. **基于 FastAPI 的实时情感打分服务**：提供了高性能的异步 API 接口，支持基础的 BERT 情感打分预测。
@@ -88,10 +96,8 @@ streamlit run src/7_app.py
 3. **Streamlit Web 可视化交互界面**：搭建了开箱即用的前端交互系统，支持单条评论的实时在线分析与历史业务报告的可视化展示。
 4. **图神经网络 (GNN) 刷单与作弊评论识别**：在 `src/9_gnn_antispam.py` 中实现了基于 PyTorch 的 GCN 原型模型，利用【用户-商品-评论】关系的拓扑结构聚合可疑水军团伙，打破了仅靠文本分析难以分辨机器刷单的瓶颈。
 5. **自动化数据流水线 (Pipeline)**：通过 `src/8_pipeline.py` 构建了基于 Schedule 的定时任务调度，实现了“增量抓取 -> 预处理 -> 模型更新 -> 大盘刷新”的每日自动闭环。
-6. **一键容器化部署 (Docker)**：配置了 `Dockerfile` 与 `docker-compose.yml`，彻底解决环境兼容性问题。只需一行命令 `docker-compose up` 即可拉起完整前后端服务。
-7. **多模态知识图谱嵌入 (KGE)**：在 `src/10_kge_multimodal.py` 中实现了 TransE 算法原型，将商品、用户、评论文本与商品视觉特征等跨模态数据统一映射到连续稠密向量空间，显著提升了推荐与评论分析的准确度上限。
-8. **千万级并发模型训练架构 (DeepSpeed)**：在 `src/11_deepspeed_bert.py` 中整合了微软的 DeepSpeed (ZeRO-2) 显存优化技术，搭配 `ds_config.json` 配置文件，赋予项目在 Linux 分布式 GPU 集群下进行千万级别语料的加速训练能力。
+6. **多模态知识图谱嵌入 (KGE)**：在 `src/10_kge_multimodal.py` 中实现了 TransE 算法原型，将商品、用户、评论文本与商品视觉特征等跨模态数据统一映射到连续稠密向量空间，显著提升了推荐与评论分析的准确度上限。
 
 ## 🔮 未来展望
-1. 将推理服务部署至 Kubernetes (K8s) 集群，并接入 Prometheus 和 Grafana 进行模型性能指标监控 (APM)。
-2. 引入 RLHF (人类反馈强化学习) 机制对生成的电商洞察报告和自动回复话术进行价值观微调对齐。
+1. 进一步融合隐式情感、细粒度情感向量与因果分析结果，优化推荐排序效果。
+2. 引入更大规模、更多品类的用户-商品交互数据，提升推荐模型泛化能力。
