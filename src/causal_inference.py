@@ -6,10 +6,18 @@
 目的: 评估评论情感倾向 (Treatment) 对用户评分 (Outcome) 的因果效应
 """
 
+import io
 import os
 import sys
 import warnings
 from pathlib import Path
+
+# 修复 Windows 控制台中文乱码
+if sys.platform == 'win32' and sys.stdout.encoding != 'utf-8':
+    try:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    except (AttributeError, OSError):
+        pass
 
 import numpy as np
 import pandas as pd
@@ -100,10 +108,11 @@ except ImportError:
 
 # ==================== 常量配置 ====================
 RANDOM_STATE = 42
-CALIPER = 0.05
+CALIPER = 0.20  # 放宽卡尺以提高匹配率 (原 0.05 太严格)
 N_ESTIMATORS = 100
 MAX_DEPTH = 6
 BOOTSTRAP_ITER = 200
+TREATMENT_DOWNSAMPLE_RATIO = 3.0  # 处理组最多为对照组的 N 倍
 
 np.random.seed(RANDOM_STATE)
 
@@ -217,7 +226,7 @@ def main():
         sys.exit(1)
 
     # 1b. 隐式情感数据
-    implicit_path = DIR_PROCESSED / "implicit_sentiment.csv"
+    implicit_path = DIR_PROCESSED / "implicit_sentiment_full.csv"
     has_implicit = False
     if implicit_path.exists():
         df_imp = pd.read_csv(implicit_path)
@@ -227,29 +236,30 @@ def main():
             if "content" in df_imp.columns and len(df_imp) == len(df):
                 # 同长度直接拼列
                 df["implicit_score"] = df_imp["implicit_score"].values
-                report_lines.append("  implicit_sentiment.csv 加载成功 (按行拼接)")
+                report_lines.append("  implicit_sentiment_full.csv 加载成功 (按行拼接)")
             elif "content" in df_imp.columns:
                 df = df.merge(
                     df_imp[["content", "implicit_score"]], on="content", how="left"
                 )
                 df["implicit_score"] = df["implicit_score"].fillna(df["sentiment"])
-                report_lines.append("  implicit_sentiment.csv 加载成功 (按content合并)")
+                report_lines.append("  implicit_sentiment_full.csv 加载成功 (按content合并)")
             else:
                 has_implicit = False
         else:
             report_lines.append(
-                "  [WARN] implicit_sentiment.csv 缺少 implicit_score 列，使用 sentiment 替代"
+                "  [WARN] implicit_sentiment_full.csv 缺少 implicit_score 列，使用 sentiment 替代"
             )
     if not has_implicit:
         report_lines.append(
-            "  [WARN] 未找到 implicit_sentiment.csv，implicit_score = sentiment + noise"
+            "  [WARN] 未找到 implicit_sentiment_full.csv，implicit_score = sentiment + noise"
         )
         noise = np.random.normal(0, 0.08, len(df))
         df["implicit_score"] = np.clip(df["sentiment"].values + noise, 0.0, 1.0)
 
-    # 1c. 属性级情感数据 (可选)
+    # 1c. 属性级情感数据
     aspect_path = DIR_PROCESSED / "aspect_sentiment.jsonl"
     has_aspect = False
+    aspect_lookup = {}
     if aspect_path.exists():
         try:
             import jsonlines
@@ -260,8 +270,12 @@ def main():
                     aspects_list.append(obj)
             if aspects_list:
                 has_aspect = True
+                # 构建 (user_id, item_id) -> aspect_sentiment dict 查找表
+                for rec in aspects_list:
+                    key = (str(rec.get('user_id', '')), str(rec.get('item_id', '')))
+                    aspect_lookup[key] = rec.get('aspect_sentiment', {})
                 report_lines.append(
-                    f"  aspect_sentiment.jsonl 加载成功 ({len(aspects_list)} 条)"
+                    f"  aspect_sentiment.jsonl 加载成功 ({len(aspects_list)} 条, {len(aspect_lookup)} 个唯一键)"
                 )
         except Exception as e:
             report_lines.append(f"  [WARN] aspect_sentiment.jsonl 读取失败: {e}")
@@ -294,6 +308,22 @@ def main():
         f"(std={df['overall_sentiment'].std():.4f})"
     )
 
+    # 降采样处理组以缓解类别不平衡 (保留对照组全部样本)
+    rng = np.random.RandomState(RANDOM_STATE)
+    treat_idx = df[df['treatment'] == 1].index
+    control_idx = df[df['treatment'] == 0].index
+    max_treat = int(len(control_idx) * TREATMENT_DOWNSAMPLE_RATIO)
+    if len(treat_idx) > max_treat:
+        downsampled_treat = rng.choice(treat_idx, size=max_treat, replace=False)
+        keep_idx = np.concatenate([downsampled_treat, control_idx])
+        df = df.loc[keep_idx].reset_index(drop=True)
+        n_treat_after = df['treatment'].sum()
+        n_control_after = len(df) - n_treat_after
+        report_lines.append(
+            f"  降采样后: 处理组={n_treat_after}, 对照组={n_control_after} "
+            f"(比例={n_treat_after/max(n_control_after,1):.1f}:1)"
+        )
+
     # 结果变量: rating = score
     df["rating"] = df["score"].astype(float)
     report_lines.append(
@@ -311,34 +341,9 @@ def main():
     )
 
     # brand: 从 product_id 提取 (JD SKU 编码，作为品类/品牌代理变量)
-    # 对 product_id 进行标签编码以用于模型
     le_brand = LabelEncoder()
     df["brand"] = le_brand.fit_transform(df["product_id"].astype(str))
     report_lines.append(f"  brand: {len(le_brand.classes_)} 个唯一 product_id (作为品牌代理)")
-
-    # price_level: 基于商品出现频次的四分位代理 (更多评论 ≈ 不同价格区间)
-    product_freq = df["product_id"].value_counts()
-    price_binned, price_bins = pd.qcut(
-        df["product_id"].map(product_freq),
-        q=4,
-        labels=False,
-        duplicates="drop",
-        retbins=True,
-    )
-    # 根据实际分位数动态生成标签
-    n_bins = len(price_bins) - 1
-    price_labels = ["low", "mid-low", "mid-high", "high"]
-    df["price_level"] = pd.cut(
-        df["product_id"].map(product_freq),
-        bins=price_bins,
-        labels=price_labels[:n_bins],
-        include_lowest=True,
-    )
-    price_level_encoded = LabelEncoder().fit_transform(df["price_level"].astype(str))
-    df["price_level_enc"] = price_level_encoded
-    report_lines.append(
-        f"  price_level: 频次四分位代理 (类别={df['price_level'].nunique()})"
-    )
 
     # review_length: 评论文本长度
     df["review_length"] = df["content"].astype(str).apply(len)
@@ -347,9 +352,44 @@ def main():
         f"(范围 [{df['review_length'].min()}, {df['review_length'].max()}])"
     )
 
-    # 混淆变量矩阵
-    confounder_cols = ["user_activity", "brand", "price_level_enc", "review_length"]
-    confounder_labels = ["用户活跃度", "品牌/商品ID", "价格层级", "评论长度"]
+    # aspect 特征: 从细粒度情感数据中提取 (替代原来无效的 price_level 代理)
+    if has_aspect and aspect_lookup:
+        aspect_counts = []
+        aspect_means = []
+        aspect_stds = []
+        for _, row in df.iterrows():
+            key = (str(row['user_id']), str(row['product_id']))
+            asp_dict = aspect_lookup.get(key, {})
+            if asp_dict:
+                values = list(asp_dict.values())
+                aspect_counts.append(len(values))
+                aspect_means.append(np.mean(values))
+                aspect_stds.append(np.std(values) if len(values) > 1 else 0.0)
+            else:
+                aspect_counts.append(0)
+                aspect_means.append(0.5)
+                aspect_stds.append(0.0)
+        df['aspect_diversity'] = aspect_counts
+        df['aspect_sentiment_mean'] = aspect_means
+        df['aspect_sentiment_std'] = aspect_stds
+        report_lines.append(
+            f"  aspect_diversity: 均值={df['aspect_diversity'].mean():.1f} 个属性/评论"
+        )
+        report_lines.append(
+            f"  aspect_sentiment_mean: 均值={df['aspect_sentiment_mean'].mean():.4f}"
+        )
+        confounder_cols = [
+            "user_activity", "brand", "review_length",
+            "aspect_diversity", "aspect_sentiment_mean", "aspect_sentiment_std",
+        ]
+        confounder_labels = [
+            "用户活跃度", "品牌/商品ID", "评论长度",
+            "属性多样性", "属性情感均值", "属性情感分歧度",
+        ]
+    else:
+        confounder_cols = ["user_activity", "brand", "review_length"]
+        confounder_labels = ["用户活跃度", "品牌/商品ID", "评论长度"]
+
     X_conf = df[confounder_cols].values.astype(float)
     treatment = df["treatment"].values
     outcome = df["rating"].values
@@ -371,7 +411,7 @@ def main():
         sys.exit(1)
 
     # 3a. 逻辑回归估计倾向得分
-    ps_model = LogisticRegression(max_iter=2000, random_state=RANDOM_STATE)
+    ps_model = LogisticRegression(max_iter=2000, random_state=RANDOM_STATE, class_weight='balanced')
     ps_model.fit(X_conf, treatment)
     propensity_scores = ps_model.predict_proba(X_conf)[:, 1]
     report_lines.append(

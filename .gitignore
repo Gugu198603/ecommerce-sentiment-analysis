@@ -13,6 +13,7 @@ ENV/
 # Data and models
 data/raw/*
 data/processed/*
+!data/processed/implicit_sentiment_full.csv
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 models/*
@@ -21,8 +22,10 @@ models/*
 # Results
 results/figures/*
 !results/figures/.gitkeep
+!results/figures/psm_balance.png
 results/reports/*
 !results/reports/.gitkeep
+!results/reports/causal_report.txt
 
 # Claude
 .claude/
