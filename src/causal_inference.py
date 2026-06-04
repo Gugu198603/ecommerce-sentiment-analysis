@@ -274,6 +274,7 @@ def main():
     aspect_path = DIR_PROCESSED / "aspect_sentiment.jsonl"
     has_aspect = False
     aspect_lookup = {}
+    aspect_use_content_key = False  # JSONL 是否包含 content 字段作为复合键
     if aspect_path.exists():
         try:
             import jsonlines
@@ -284,9 +285,17 @@ def main():
                     aspects_list.append(obj)
             if aspects_list:
                 has_aspect = True
-                # 构建 (user_id, item_id) -> aspect_sentiment dict 查找表
+                _has_content = "content" in aspects_list[0]
+                aspect_use_content_key = _has_content
                 for rec in aspects_list:
-                    key = (str(rec.get('user_id', '')), str(rec.get('item_id', '')))
+                    if _has_content:
+                        key = (
+                            str(rec.get('user_id', '')),
+                            str(rec.get('item_id', '')),
+                            str(rec.get('content', '')),
+                        )
+                    else:
+                        key = (str(rec.get('user_id', '')), str(rec.get('item_id', '')))
                     aspect_lookup[key] = rec.get('aspect_sentiment', {})
                 report_lines.append(
                     f"  aspect_sentiment.jsonl 加载成功 ({len(aspects_list)} 条, {len(aspect_lookup)} 个唯一键)"
@@ -312,8 +321,8 @@ def main():
         0.6 * df["sentiment"] + 0.4 * df["implicit_score"]
     )
     df["treatment"] = (df["overall_sentiment"] > 0.5).astype(int)
-    n_treat = df["treatment"].sum()
-    n_control = len(df) - n_treat
+    n_treat = int(df["treatment"].sum())
+    n_control = int(len(df) - n_treat)
     report_lines.append(
         f"  Treatment (overall_sentiment>0.5): 处理组={n_treat}, 对照组={n_control}"
     )
@@ -331,8 +340,10 @@ def main():
         downsampled_treat = rng.choice(treat_idx, size=max_treat, replace=False)
         keep_idx = np.concatenate([downsampled_treat, control_idx])
         df = df.loc[keep_idx].reset_index(drop=True)
-        n_treat_after = df['treatment'].sum()
-        n_control_after = len(df) - n_treat_after
+        n_treat_after = int(df['treatment'].sum())
+        n_control_after = int(len(df) - n_treat_after)
+        n_treat = n_treat_after
+        n_control = n_control_after
         report_lines.append(
             f"  降采样后: 处理组={n_treat_after}, 对照组={n_control_after} "
             f"(比例={n_treat_after/max(n_control_after,1):.1f}:1)"
@@ -372,7 +383,10 @@ def main():
         aspect_means = []
         aspect_stds = []
         for _, row in df.iterrows():
-            key = (str(row['user_id']), str(row['product_id']))
+            if aspect_use_content_key:
+                key = (str(row['user_id']), str(row['product_id']), str(row['content']))
+            else:
+                key = (str(row['user_id']), str(row['product_id']))
             asp_dict = aspect_lookup.get(key, {})
             if asp_dict:
                 values = list(asp_dict.values())

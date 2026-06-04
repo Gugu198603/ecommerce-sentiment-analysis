@@ -405,6 +405,7 @@ def run_aspect_sentiment(input_csv_path=None):
         jsonl_records.append({
             "user_id": row['user_id'],
             "item_id": row['item_id'],
+            "content": row.get('content', row.get(text_col, '')),
             "aspect_sentiment": aspect_sent
         })
         vector_records.append({
