@@ -226,7 +226,11 @@ def main():
         sys.exit(1)
 
     # 1b. 隐式情感数据
-    implicit_path = DIR_PROCESSED / "implicit_sentiment_full.csv"
+    implicit_candidates = [
+        DIR_PROCESSED / "implicit_sentiment.csv",
+        DIR_PROCESSED / "implicit_sentiment_full.csv",
+    ]
+    implicit_path = next((path for path in implicit_candidates if path.exists()), implicit_candidates[0])
     has_implicit = False
     if implicit_path.exists():
         df_imp = pd.read_csv(implicit_path)
@@ -235,19 +239,29 @@ def main():
             # 按 content 合并 (content 为评论文本唯一键)
             if "content" in df_imp.columns and len(df_imp) == len(df):
                 # 同长度直接拼列
-                df["implicit_score"] = df_imp["implicit_score"].values
-                report_lines.append("  implicit_sentiment_full.csv 加载成功 (按行拼接)")
+                raw_implicit = df_imp["implicit_score"].astype(float).values
+                explicit_sentiment = df["sentiment"].astype(float).values
+                df["implicit_score"] = np.where(
+                    (raw_implicit >= 0.0) & (raw_implicit <= 1.0),
+                    raw_implicit,
+                    explicit_sentiment,
+                )
+                report_lines.append(f"  {implicit_path.name} 加载成功 (按行拼接)")
             elif "content" in df_imp.columns:
                 df = df.merge(
                     df_imp[["content", "implicit_score"]], on="content", how="left"
                 )
-                df["implicit_score"] = df["implicit_score"].fillna(df["sentiment"])
-                report_lines.append("  implicit_sentiment_full.csv 加载成功 (按content合并)")
+                df["implicit_score"] = np.where(
+                    df["implicit_score"].between(0.0, 1.0, inclusive="both"),
+                    df["implicit_score"],
+                    df["sentiment"],
+                )
+                report_lines.append(f"  {implicit_path.name} 加载成功 (按content合并)")
             else:
                 has_implicit = False
         else:
             report_lines.append(
-                "  [WARN] implicit_sentiment_full.csv 缺少 implicit_score 列，使用 sentiment 替代"
+                f"  [WARN] {implicit_path.name} 缺少 implicit_score 列，使用 sentiment 替代"
             )
     if not has_implicit:
         report_lines.append(
