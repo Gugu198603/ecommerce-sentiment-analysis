@@ -9,6 +9,7 @@ LightGCN-style neighbor propagation, and exports Top-K recommendations.
 
 from __future__ import annotations
 
+import argparse
 import csv
 import math
 import random
@@ -143,12 +144,22 @@ def parse_sentiment_vector(raw_value: str) -> Vector:
     return [safe_float(value, 0.5) for value in raw_value.split()]
 
 
-def load_sentiment_vectors(vector_file: Path) -> Dict[Tuple[str, str], Vector]:
+def parse_mask_vector(raw_value: str, dim: int) -> List[int]:
+    if not raw_value:
+        return [1] * dim
+    parsed = [int(safe_float(value, 0.0)) for value in raw_value.split()]
+    if len(parsed) < dim:
+        parsed.extend([0] * (dim - len(parsed)))
+    return parsed[:dim]
+
+
+def load_sentiment_vectors(vector_file: Path) -> Tuple[Dict[Tuple[str, str], Vector], Dict[Tuple[str, str], List[int]]]:
     if not vector_file.exists():
         logger.warning("Sentiment vector file not found: %s", vector_file)
-        return {}
+        return {}, {}
 
     vectors: Dict[Tuple[str, str], Vector] = {}
+    masks: Dict[Tuple[str, str], List[int]] = {}
     with vector_file.open("r", encoding="utf-8-sig", newline="") as file:
         reader = csv.DictReader(file)
         required = {"user_id", "item_id", "vector"}
@@ -156,13 +167,20 @@ def load_sentiment_vectors(vector_file: Path) -> Dict[Tuple[str, str], Vector]:
         if missing:
             raise ValueError(f"Missing required columns in {vector_file}: {sorted(missing)}")
 
+        has_mask = "vector_mask" in (reader.fieldnames or [])
+
         for row in reader:
             user_id = (row.get("user_id") or "").strip()
             item_id = (row.get("item_id") or "").strip()
             vector = parse_sentiment_vector(row.get("vector") or "")
             if user_id and item_id and vector:
-                vectors[(user_id, item_id)] = vector
-    return vectors
+                key = (user_id, item_id)
+                vectors[key] = vector
+                if has_mask:
+                    masks[key] = parse_mask_vector(row.get("vector_mask") or "", len(vector))
+                else:
+                    masks[key] = [1] * len(vector)
+    return vectors, masks
 
 
 def filter_active_users(interactions: List[Interaction]) -> List[Interaction]:
@@ -208,23 +226,58 @@ def average_vectors(vectors: List[Vector]) -> Vector:
     return [sum(vector[idx] for vector in vectors) / len(vectors) for idx in range(dim)]
 
 
+def average_mask(masks: List[List[int]]) -> List[int]:
+    if not masks:
+        return []
+    dim = len(masks[0])
+    result: List[int] = []
+    for idx in range(dim):
+        result.append(1 if any(mask[idx] == 1 for mask in masks) else 0)
+    return result
+
+
 def build_sentiment_profiles(
     train_rows: List[Interaction],
     sentiment_vectors: Dict[Tuple[str, str], Vector],
-) -> Tuple[Dict[str, Vector], Dict[str, Vector], Vector, Dict[str, float], Dict[str, float], float]:
+    sentiment_masks: Dict[Tuple[str, str], List[int]],
+) -> Tuple[
+    Dict[str, Vector],
+    Dict[str, Vector],
+    Vector,
+    Dict[str, float],
+    Dict[str, float],
+    float,
+    Dict[str, List[int]],
+    Dict[str, List[int]],
+    List[int],
+]:
     user_vectors: Dict[str, List[Vector]] = defaultdict(list)
     item_vectors: Dict[str, List[Vector]] = defaultdict(list)
+    user_masks: Dict[str, List[List[int]]] = defaultdict(list)
+    item_masks: Dict[str, List[List[int]]] = defaultdict(list)
     user_implicit_scores: Dict[str, List[float]] = defaultdict(list)
     item_implicit_scores: Dict[str, List[float]] = defaultdict(list)
     all_vectors: List[Vector] = []
+    all_masks: List[List[int]] = []
     all_implicit_scores: List[float] = []
 
     for user_id, item_id, _, _, implicit_score in train_rows:
-        vector = sentiment_vectors.get((user_id, item_id))
+        key = (user_id, item_id)
+        vector = sentiment_vectors.get(key)
+        mask = sentiment_masks.get(key)
         if vector:
             user_vectors[user_id].append(vector)
             item_vectors[item_id].append(vector)
             all_vectors.append(vector)
+            if mask:
+                user_masks[user_id].append(mask)
+                item_masks[item_id].append(mask)
+                all_masks.append(mask)
+            else:
+                fallback_mask = [1] * len(vector)
+                user_masks[user_id].append(fallback_mask)
+                item_masks[item_id].append(fallback_mask)
+                all_masks.append(fallback_mask)
         user_implicit_scores[user_id].append(implicit_score)
         item_implicit_scores[item_id].append(implicit_score)
         all_implicit_scores.append(implicit_score)
@@ -232,6 +285,11 @@ def build_sentiment_profiles(
     user_profiles = {user_id: average_vectors(vectors) for user_id, vectors in user_vectors.items()}
     item_profiles = {item_id: average_vectors(vectors) for item_id, vectors in item_vectors.items()}
     global_profile = average_vectors(all_vectors)
+
+    user_profile_masks = {user_id: average_mask(masks) for user_id, masks in user_masks.items()}
+    item_profile_masks = {item_id: average_mask(masks) for item_id, masks in item_masks.items()}
+    global_profile_mask = average_mask(all_masks)
+
     user_implicit = {
         user_id: sum(scores) / len(scores) for user_id, scores in user_implicit_scores.items()
     }
@@ -239,21 +297,51 @@ def build_sentiment_profiles(
         item_id: sum(scores) / len(scores) for item_id, scores in item_implicit_scores.items()
     }
     global_implicit = sum(all_implicit_scores) / len(all_implicit_scores) if all_implicit_scores else 0.5
-    return user_profiles, item_profiles, global_profile, user_implicit, item_implicit, global_implicit
+    return (
+        user_profiles,
+        item_profiles,
+        global_profile,
+        user_implicit,
+        item_implicit,
+        global_implicit,
+        user_profile_masks,
+        item_profile_masks,
+        global_profile_mask,
+    )
 
 
 def centered(vector: Sequence[float]) -> Vector:
     return [value - 0.5 for value in vector]
 
 
-def sentiment_match_score(user_profile: Vector, item_profile: Vector) -> float:
+def sentiment_match_score(
+    user_profile: Vector,
+    item_profile: Vector,
+    user_mask: List[int] | None = None,
+    item_mask: List[int] | None = None,
+) -> float:
     if not user_profile or not item_profile:
         return 0.5
 
-    centered_user = centered(user_profile)
-    centered_item = centered(item_profile)
+    if user_mask is None:
+        user_mask = [1] * len(user_profile)
+    if item_mask is None:
+        item_mask = [1] * len(item_profile)
+
+    active_idx = [
+        idx for idx in range(min(len(user_profile), len(item_profile), len(user_mask), len(item_mask)))
+        if user_mask[idx] == 1 and item_mask[idx] == 1
+    ]
+    if not active_idx:
+        return 0.5
+
+    masked_user = [user_profile[idx] for idx in active_idx]
+    masked_item = [item_profile[idx] for idx in active_idx]
+
+    centered_user = centered(masked_user)
+    centered_item = centered(masked_item)
     similarity = (cosine(centered_user, centered_item) + 1.0) / 2.0
-    item_sentiment = sum(item_profile) / len(item_profile)
+    item_sentiment = sum(masked_item) / len(masked_item)
     return 0.7 * similarity + 0.3 * item_sentiment
 
 
@@ -391,19 +479,24 @@ def recommend_with_sentiment(
     user_implicit: Dict[str, float],
     item_implicit: Dict[str, float],
     global_implicit: float,
+    user_profile_masks: Dict[str, List[int]],
+    item_profile_masks: Dict[str, List[int]],
+    global_profile_mask: List[int],
     alpha: float,
     top_k: int,
 ) -> EnhancedRecommendation:
     recommendations: EnhancedRecommendation = {}
     for user_idx, user_id in enumerate(users):
         user_profile = user_profiles.get(user_id, global_profile)
+        user_mask = user_profile_masks.get(user_id, global_profile_mask)
         scores = []
         for item_idx, item_id in enumerate(items):
             if item_idx in seen_items.get(user_idx, set()):
                 continue
             lightgcn_score = dot(user_emb[user_idx], item_emb[item_idx])
             item_profile = item_profiles.get(item_id, global_profile)
-            aspect_score = sentiment_match_score(user_profile, item_profile)
+            item_mask = item_profile_masks.get(item_id, global_profile_mask)
+            aspect_score = sentiment_match_score(user_profile, item_profile, user_mask, item_mask)
             implicit_score = implicit_match_score(
                 user_implicit.get(user_id, global_implicit),
                 item_implicit.get(item_id, global_implicit),
@@ -513,6 +606,7 @@ def write_reports(
     evaluated_users: int,
     sentiment_vector_count: int,
     alpha_results: List[Tuple[float, float, float, int]],
+    sentiment_vector_file: Path,
 ) -> None:
     QUALITY_OUTPUT.write_text(
         "\n".join(
@@ -526,6 +620,7 @@ def write_reports(
                 f"Users used: {user_count}",
                 f"Items used: {item_count}",
                 f"Sentiment vectors loaded: {sentiment_vector_count}",
+                f"Sentiment vector file: {sentiment_vector_file}",
                 "Note: product_id is used as item_id for the phone-category recommendation experiment.",
             ]
         )
@@ -575,14 +670,32 @@ def write_reports(
             )
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train vanilla and sentiment-enhanced LightGCN-style recommender.")
+    parser.add_argument(
+        "--input-file",
+        type=Path,
+        default=INPUT_FILE,
+        help="Path to processed interaction CSV (default: data/processed/cleaned_data.csv)",
+    )
+    parser.add_argument(
+        "--sentiment-vector-file",
+        type=Path,
+        default=SENTIMENT_VECTOR_FILE,
+        help="Path to sentiment vectors CSV (default: data/processed/sentiment_vectors.csv)",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
     ensure_dirs()
     random.seed(RANDOM_STATE)
 
-    raw_interactions = read_positive_interactions(INPUT_FILE)
+    raw_interactions = read_positive_interactions(args.input_file)
     filtered_interactions = filter_active_users(raw_interactions)
     train_rows, test_rows = split_leave_one_out(filtered_interactions)
-    sentiment_vectors = load_sentiment_vectors(SENTIMENT_VECTOR_FILE)
+    sentiment_vectors, sentiment_masks = load_sentiment_vectors(args.sentiment_vector_file)
 
     user_to_idx, item_to_idx, users, items = build_id_maps(train_rows + test_rows)
     train_pairs = encode_rows(train_rows, user_to_idx, item_to_idx)
@@ -611,7 +724,10 @@ def main() -> None:
         user_implicit,
         item_implicit,
         global_implicit,
-    ) = build_sentiment_profiles(train_rows, sentiment_vectors)
+        user_profile_masks,
+        item_profile_masks,
+        global_profile_mask,
+    ) = build_sentiment_profiles(train_rows, sentiment_vectors, sentiment_masks)
 
     alpha_results: List[Tuple[float, float, float, int]] = []
     enhanced_recommendations: EnhancedRecommendation = {}
@@ -628,6 +744,9 @@ def main() -> None:
             user_implicit,
             item_implicit,
             global_implicit,
+            user_profile_masks,
+            item_profile_masks,
+            global_profile_mask,
             alpha,
             TOP_K,
         )
@@ -651,6 +770,9 @@ def main() -> None:
             user_implicit,
             item_implicit,
             global_implicit,
+            user_profile_masks,
+            item_profile_masks,
+            global_profile_mask,
             SENTIMENT_ALPHAS[0],
             TOP_K,
         )
@@ -669,6 +791,7 @@ def main() -> None:
         evaluated_users=evaluated_users,
         sentiment_vector_count=len(sentiment_vectors),
         alpha_results=alpha_results,
+        sentiment_vector_file=args.sentiment_vector_file,
     )
 
     logger.info("Recommendation output: %s", RECOMMEND_OUTPUT)
