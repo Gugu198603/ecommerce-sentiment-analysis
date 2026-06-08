@@ -1,0 +1,24 @@
+========== PyTorch LightGCN Metrics ==========
+Model: Standard PyTorch LightGCN with BPR Loss + causal edge weights
+Embedding dim: 32
+Graph layers: 2
+Epochs: 120
+Batch size: 1024
+Learning rate: 0.01
+Regularization: 0.0001
+Causal alpha: 5.0
+Causal mode: residual
+Causal forest available: True
+Implicit score fallback: if implicit_score == -1, use explicit sentiment instead
+Propensity mean: 0.840142
+Propensity range: [0.315287, 0.890670]
+PSM matched pairs: 1030
+PSM ATE (rating diff): 0.028155
+CATE mean: 0.025000
+CATE range: [-0.001807, 0.089512]
+Causal edge weight range: [0.931150, 1.069753]
+Causal edge weight mean: 1.003225
+Recall@10: 0.344072
+NDCG@10: 0.165827
+Evaluated users: 3011
+Candidate items: 37
