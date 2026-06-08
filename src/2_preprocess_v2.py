@@ -41,11 +41,19 @@ STOPWORDS_URLS = [
 ASPECT_OUTPUT_JSONL = "../data/processed/aspect_sentiment.jsonl"
 ASPECT_OUTPUT_VECTORS = "../data/processed/sentiment_vectors.csv"
 ASPECT_OUTPUT_VOCAB = "../data/processed/aspect_vocab.txt"
+ASPECT_OUTPUT_COVERAGE = "../data/processed/aspect_coverage.csv"
+ASPECT_OUTPUT_JSONL_FILTERED = "../data/processed/aspect_sentiment_filtered.jsonl"
+ASPECT_OUTPUT_VECTORS_FILTERED = "../data/processed/sentiment_vectors_filtered.csv"
+ASPECT_OUTPUT_COVERAGE_FILTERED = "../data/processed/aspect_coverage_filtered.csv"
 ASPECT_SAMPLE_SIZE = None
 ASPECT_MIN_FREQ = 3                # 属性词最少出现次数
 ASPECT_TOP_K = 30                  # 保留的最大属性数
 ASPECT_WINDOW_SIZE = 5             # 窗口大小（词数）
-ASPECT_DEFAULT_SENTIMENT = 0.5     # 未出现属性的默认值
+ASPECT_DEFAULT_SENTIMENT = 0.5     # 情感向量默认值（仅用于保持兼容；请结合vector_mask使用）
+ASPECT_VOCAB_MIN_TEXT_LEN = 20     # 构建属性词表时仅使用长度>=该阈值的评论
+ASPECT_FILTER_ENABLE = True        # 是否输出“高信息密度评论”子集
+ASPECT_FILTER_MIN_TEXT_LEN = 20    # 子集最小评论长度
+ASPECT_FILTER_MIN_MENTION = 2      # 子集最小属性提及数
 
 # 内置情感词典（可扩展）
 POS_WORDS = {
@@ -341,8 +349,98 @@ def extract_aspect_sentiment_rule_based(text, aspect_vocab, pos_set, neg_set, ne
                 result[asp] = score
     return result
 
-def dict_to_vector(aspect_sent, aspect_vocab, default=0.5):
-    return [aspect_sent.get(asp, default) for asp in aspect_vocab]
+def dict_to_vector_and_mask(aspect_sent, aspect_vocab, default=0.5):
+    """将属性情感字典转换为向量，同时输出提及掩码（1=提及，0=未提及）"""
+    vector = []
+    mask = []
+    for asp in aspect_vocab:
+        if asp in aspect_sent:
+            vector.append(aspect_sent[asp])
+            mask.append(1)
+        else:
+            vector.append(default)
+            mask.append(0)
+    return vector, mask
+
+
+def print_aspect_vector_stats(vector_records, aspect_vocab, coverage_output_path=ASPECT_OUTPUT_COVERAGE, title="向量分布统计"):
+    """打印向量稀疏度与维度覆盖统计，便于诊断“全中性”问题"""
+    if not vector_records:
+        print(f"⚠️ {title}: 无向量记录，跳过统计")
+        return {
+            'rows': 0,
+            'mention_ratio': 0.0,
+            'default_ratio': 0.0,
+            'rows_any_mention_ratio': 0.0,
+            'rows_all_default_ratio': 0.0,
+            'mean_mention_per_row': 0.0,
+        }
+
+    total_rows = len(vector_records)
+    dim = len(aspect_vocab)
+    total_cells = total_rows * dim
+
+    total_mentioned = 0
+    rows_with_any_mention = 0
+    rows_all_default = 0
+    per_aspect_mentioned = [0] * dim
+
+    for rec in vector_records:
+        raw_mask = rec['vector_mask']
+        if isinstance(raw_mask, str):
+            mask = [int(x) for x in raw_mask.split() if x]
+        else:
+            mask = [int(x) for x in raw_mask]
+
+        mention_cnt = sum(mask)
+        total_mentioned += mention_cnt
+        if mention_cnt > 0:
+            rows_with_any_mention += 1
+        else:
+            rows_all_default += 1
+        for i, m in enumerate(mask):
+            if m == 1:
+                per_aspect_mentioned[i] += 1
+
+    mention_ratio = total_mentioned / total_cells
+    default_ratio = 1 - mention_ratio
+    rows_any_mention_ratio = rows_with_any_mention / total_rows
+    rows_all_default_ratio = rows_all_default / total_rows
+    mean_mention_per_row = total_mentioned / total_rows
+
+    print(f"\n📈 {title}（结合 vector_mask 解读）")
+    print(f"   总维度单元数: {total_cells}")
+    print(f"   提及单元数: {total_mentioned} ({mention_ratio:.2%})")
+    print(f"   默认值单元数: {total_cells - total_mentioned} ({default_ratio:.2%})")
+    print(f"   至少提及一个属性的评论: {rows_with_any_mention} / {total_rows} ({rows_any_mention_ratio:.2%})")
+    print(f"   全默认评论: {rows_all_default} / {total_rows} ({rows_all_default_ratio:.2%})")
+    print(f"   单条评论平均提及属性数: {mean_mention_per_row:.2f}")
+
+    coverage_rows = []
+    for i, asp in enumerate(aspect_vocab):
+        cnt = per_aspect_mentioned[i]
+        cov = cnt / total_rows
+        coverage_rows.append({'aspect': asp, 'mention_count': cnt, 'coverage': cov})
+
+    # 输出每个属性覆盖率，便于后续筛词
+    os.makedirs(os.path.dirname(coverage_output_path), exist_ok=True)
+    pd.DataFrame(coverage_rows).sort_values('coverage', ascending=False).to_csv(
+        coverage_output_path, index=False, encoding='utf-8-sig'
+    )
+    print(f"   属性覆盖率已保存: {coverage_output_path}")
+
+    low_coverage = [r for r in coverage_rows if r['coverage'] < 0.01]
+    if low_coverage:
+        print(f"   ⚠️ 低覆盖属性(<1%)数量: {len(low_coverage)}，建议筛除")
+
+    return {
+        'rows': total_rows,
+        'mention_ratio': mention_ratio,
+        'default_ratio': default_ratio,
+        'rows_any_mention_ratio': rows_any_mention_ratio,
+        'rows_all_default_ratio': rows_all_default_ratio,
+        'mean_mention_per_row': mean_mention_per_row,
+    }
 
 def run_aspect_sentiment(input_csv_path=None):
     """执行基于规则的细粒度情感分析"""
@@ -379,9 +477,14 @@ def run_aspect_sentiment(input_csv_path=None):
         df = df.head(ASPECT_SAMPLE_SIZE)
     print(f"✅ 加载数据完成，共 {len(df)} 条评论")
 
-    # 构建属性词表（使用清洗后的文本）
-    all_texts = df[text_col].tolist()
-    aspect_vocab = build_aspect_vocab_from_texts(all_texts, min_freq=ASPECT_MIN_FREQ, top_k=ASPECT_TOP_K)
+    # 构建属性词表（优先使用信息密度更高的评论，降低“全默认”倾向）
+    vocab_texts = df[df[text_col].astype(str).str.len() >= ASPECT_VOCAB_MIN_TEXT_LEN][text_col].tolist()
+    if len(vocab_texts) < 1000:
+        vocab_texts = df[text_col].tolist()
+        print(f"⚠️ 长文本样本不足，回退为全量文本构建词表（共 {len(vocab_texts)} 条）")
+    else:
+        print(f"✅ 使用长度>={ASPECT_VOCAB_MIN_TEXT_LEN} 的 {len(vocab_texts)} 条评论构建词表")
+    aspect_vocab = build_aspect_vocab_from_texts(vocab_texts, min_freq=ASPECT_MIN_FREQ, top_k=ASPECT_TOP_K)
 
     # 保存词表
     os.makedirs(os.path.dirname(ASPECT_OUTPUT_VOCAB), exist_ok=True)
@@ -400,17 +503,19 @@ def run_aspect_sentiment(input_csv_path=None):
     for idx, row in tqdm(df.iterrows(), total=total, desc="细粒度情感分析（规则）"):
         text = row[text_col]
         aspect_sent = extract_aspect_sentiment_rule_based(text, aspect_vocab, pos_set, neg_set, negation_set)
-        vector = dict_to_vector(aspect_sent, aspect_vocab, ASPECT_DEFAULT_SENTIMENT)
+        vector, vector_mask = dict_to_vector_and_mask(aspect_sent, aspect_vocab, ASPECT_DEFAULT_SENTIMENT)
 
         jsonl_records.append({
             "user_id": row['user_id'],
             "item_id": row['item_id'],
+            "content": row.get('content', row.get(text_col, '')),
             "aspect_sentiment": aspect_sent
         })
         vector_records.append({
             "user_id": row['user_id'],
             "item_id": row['item_id'],
-            "vector": ' '.join([f"{v:.4f}" for v in vector])
+            "vector": ' '.join([f"{v:.4f}" for v in vector]),
+            "vector_mask": ' '.join([str(m) for m in vector_mask])
         })
 
     # 输出 jsonl
@@ -425,9 +530,48 @@ def run_aspect_sentiment(input_csv_path=None):
     pd.DataFrame(vector_records).to_csv(ASPECT_OUTPUT_VECTORS, index=False, encoding='utf-8-sig')
     print(f"✅ 已输出 {len(vector_records)} 条向量到 {ASPECT_OUTPUT_VECTORS}")
 
+    base_stats = print_aspect_vector_stats(vector_records, aspect_vocab)
+
+    if ASPECT_FILTER_ENABLE:
+        print("\n🔍 生成高信息密度评论子集（用于降低默认值占比）...")
+        filtered_records = []
+        filtered_jsonl_records = []
+        for rec, jrec in zip(vector_records, jsonl_records):
+            text = jrec.get('content', '')
+            text_len = len(str(text))
+            mention_cnt = sum(int(x) for x in str(rec['vector_mask']).split() if x)
+            if text_len >= ASPECT_FILTER_MIN_TEXT_LEN and mention_cnt >= ASPECT_FILTER_MIN_MENTION:
+                filtered_records.append(rec)
+                filtered_jsonl_records.append(jrec)
+
+        if filtered_records:
+            os.makedirs(os.path.dirname(ASPECT_OUTPUT_VECTORS_FILTERED), exist_ok=True)
+            pd.DataFrame(filtered_records).to_csv(ASPECT_OUTPUT_VECTORS_FILTERED, index=False, encoding='utf-8-sig')
+            with open(ASPECT_OUTPUT_JSONL_FILTERED, 'w', encoding='utf-8') as f:
+                for rec in filtered_jsonl_records:
+                    f.write(json.dumps(rec, ensure_ascii=False) + '\n')
+            print(f"✅ 子集向量已输出: {ASPECT_OUTPUT_VECTORS_FILTERED} ({len(filtered_records)} 条)")
+            print(f"✅ 子集jsonl已输出: {ASPECT_OUTPUT_JSONL_FILTERED} ({len(filtered_jsonl_records)} 条)")
+
+            filtered_stats = print_aspect_vector_stats(
+                filtered_records,
+                aspect_vocab,
+                coverage_output_path=ASPECT_OUTPUT_COVERAGE_FILTERED,
+                title="高信息密度子集统计"
+            )
+            print(
+                f"   ✅ 默认值占比从 {base_stats['default_ratio']:.2%} 降至 {filtered_stats['default_ratio']:.2%}"
+            )
+            print(
+                f"   ✅ 单条平均提及属性数从 {base_stats['mean_mention_per_row']:.2f} 提升到 {filtered_stats['mean_mention_per_row']:.2f}"
+            )
+        else:
+            print("⚠️ 当前筛选阈值过严，未得到子集，请调低 ASPECT_FILTER_* 参数")
+
     print("\n📊 细粒度情感分析完成")
     print(f"   属性词数量: {len(aspect_vocab)}")
     print(f"   有效评论（至少含一个属性）: {sum(1 for r in jsonl_records if r['aspect_sentiment'])} / {len(df)}")
+    print("   提示：vector中的0.5不再等价于“中性”，请结合vector_mask判断是否为未提及属性")
 
 # ==================== 主入口 ====================
 if __name__ == "__main__":
